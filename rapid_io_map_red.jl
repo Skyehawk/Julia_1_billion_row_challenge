@@ -2,7 +2,7 @@ using Mmap, Base.Threads, BenchmarkTools, ThreadsX
 
 # Define the process_chunk function to process each chunk
 function process_chunk(mapped_data::Vector{UInt8}, start_idx::Int, end_idx::Int)
-    data_dict = Dict{String, Dict{String, Float32}}()
+    data_dict = Dict{String, Dict{String, Int32}}()
 
     i = start_idx
     leftover_start = start_idx
@@ -20,16 +20,16 @@ function process_chunk(mapped_data::Vector{UInt8}, start_idx::Int, end_idx::Int)
 
                     try
                         temp_int = extract_temperature(temp_data)
-                        temp_float = temp_int / 10.0
                         # Check if station already exists in dictionary
                         if haskey(data_dict, station_data)
                             current_values = data_dict[station_data]
-                            current_values["min"] = min(current_values["min"], temp_float)
-                            current_values["max"] = max(current_values["max"], temp_float)
-                            current_values["sum"] += temp_float
+                            # ifelse is faster than min/max
+                            current_values["min"] =  ifelse(temp_int < current_values["min"], temp_int, current_values["min"]) #min(current_values["min"], temp_float)
+                            current_values["max"] =  ifelse(temp_int > current_values["max"], temp_int, current_values["max"]) #max(current_values["max"], temp_float)
+                            current_values["sum"] += temp_int
                             current_values["count"] += 1
                         else
-                            data_dict[station_data] = Dict("min" => temp_float, "max" => temp_float, "sum" => temp_float, "count" => 1)
+                            data_dict[station_data] = Dict("min" => temp_int, "max" => temp_int, "sum" => temp_int, "count" => 1)
                         end
                     catch e
                         # Handle the error if necessary
@@ -74,23 +74,8 @@ function extract_temperature(temp_data::SubArray{UInt8})
     return temp_int
 end
 
-# Function to merge two dictionaries
-function merge_dicts(d1::Dict{String, Dict{String, Float32}}, d2::Dict{String, Dict{String, Float32}})
-    for (key, value) in d2
-        if haskey(d1, key)
-            d1[key]["min"] = min(d1[key]["min"], value["min"])
-            d1[key]["max"] = max(d1[key]["max"], value["max"])
-            d1[key]["sum"] += value["sum"]
-            d1[key]["count"] += value["count"]
-        else
-            d1[key] = value
-        end
-    end
-    return d1
-end
-
 # Define the process_file function to read the file in chunks and process them in parallel
-function process_file(file_path::String, io_chunk_size::Int)
+function process_file(file_path::String)
     file = open(file_path, "r")
     mapped_data = Mmap.mmap(file)
     close(file)
@@ -101,7 +86,7 @@ function process_file(file_path::String, io_chunk_size::Int)
     chunks = [(i, min(i + chunk_length - 1, total_length)) for i in 1:chunk_length:total_length]
 
     @time results = ThreadsX.map(chunk -> process_chunk(mapped_data, chunk[1], chunk[2]), chunks)
-    combined_result = Dict{String, Dict{String, Float32}}()
+    combined_result = Dict{String, Dict{String, Int32}}()
     for result in results
         merge_dicts!(combined_result, result)
     end
@@ -109,11 +94,12 @@ function process_file(file_path::String, io_chunk_size::Int)
 end
 
 # Function to merge two dictionaries in place
-function merge_dicts!(d1::Dict{String, Dict{String, Float32}}, d2::Dict{String, Dict{String, Float32}})
+function merge_dicts!(d1::Dict{String, Dict{String, Int32}}, d2::Dict{String, Dict{String, Int32}})
     for (key, value) in d2
         if haskey(d1, key)
-            d1[key]["min"] = min(d1[key]["min"], value["min"])
-            d1[key]["max"] = max(d1[key]["max"], value["max"])
+            # doesn't matter a lot here, but ifelse is faster than min/max
+            d1[key]["min"] = ifelse(value["min"] < d1[key]["min"], value["min"], d1[key]["min"]) #min(d1[key]["min"], value["min"])
+            d1[key]["max"] = ifelse(value["max"] > d1[key]["max"], value["min"], d1[key]["max"]) #max(d1[key]["max"], value["max"])
             d1[key]["sum"] += value["sum"]
             d1[key]["count"] += value["count"]
         else
@@ -123,13 +109,13 @@ function merge_dicts!(d1::Dict{String, Dict{String, Float32}}, d2::Dict{String, 
 end
 
 # Define the print_stats function to print the result
-function print_stats(summary_stats::Dict{String, Dict{String, Float32}})
+function print_stats(summary_stats::Dict{String, Dict{String, Int32}})
     sorted_keys = sort(collect(keys(summary_stats)))
     for stn in sorted_keys
         min_temp = summary_stats[stn]["min"]
         max_temp = summary_stats[stn]["max"]
-        avg_temp = summary_stats[stn]["sum"] / summary_stats[stn]["count"]
-        println("$stn;$min_temp;$max_temp;$avg_temp")
+        avg_temp = (summary_stats[stn]["sum"] /10) / summary_stats[stn]["count"]     # div by 10 to get from our shorthand int that ignored the decimal back to normal float
+        #println("$stn;$min_temp;$max_temp;$avg_temp")
     end
 end
 
@@ -137,8 +123,6 @@ end
 if abspath(PROGRAM_FILE) == @__FILE__
     println(pwd())
     println(ARGS)
-    file_path = isempty(ARGS) ? "./measurements_1B.txt" : ARGS[1]
-    io_chunk_size = 1024 * 8  # Adjust chunk size as needed
-    process_file(file_path, io_chunk_size) |> print_stats
+    file_path = isempty(ARGS) ? "./measurements_10M.txt" : ARGS[1]
+    @time process_file(file_path) |> print_stats
 end
-
