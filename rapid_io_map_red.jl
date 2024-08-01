@@ -6,6 +6,8 @@ function process_chunk(mapped_data::Vector{UInt8}, start_idx::Int, end_idx::Int)
 
     i = start_idx
     leftover_start = start_idx
+    # TODO: Gracefully handle leftovers
+    # TODO: refactor the temperature variables: temp_data, temp_int etc., so as not to be confused with temporary values 
 
     while i <= end_idx
         if mapped_data[i] == UInt8('\n') || i == end_idx
@@ -15,7 +17,7 @@ function process_chunk(mapped_data::Vector{UInt8}, start_idx::Int, end_idx::Int)
             if !isempty(line_data)
                 semicolon_index = find_semicolon_from_end(line_data)
                 if semicolon_index > 0
-                    station_data = view(line_data, 1:(semicolon_index-1))    # view(...) is faster than square bracket style indexing
+                    station_data = view(line_data, 1:(semicolon_index-1))    # view(...) is faster than square bracket style indexing and avoids a bunch of allocations as we are just making a pointer to the data
                     temp_data = view(line_data, (semicolon_index+1):length(line_data))
                     #println(typeof(view(line_data, 1:(semicolon_index-1))))
 
@@ -85,6 +87,7 @@ function process_file(file_path::String)
     total_length = length(mapped_data)
     chunk_length = div(total_length, Threads.nthreads())
 
+    # TODO: investigate this line for causing a potential performance hit
     chunks = [(i, min(i + chunk_length - 1, total_length)) for i in 1:chunk_length:total_length]
 
     results = ThreadsX.map(chunk -> process_chunk(mapped_data, chunk[1], chunk[2]), chunks)
@@ -118,7 +121,7 @@ function print_stats(summary_stats::Dict{SubArray{UInt8, 1, Vector{UInt8}, Tuple
         min_temp = summary_stats[stn]["min"] / 10
         max_temp = summary_stats[stn]["max"] / 10 
         avg_temp = (summary_stats[stn]["sum"] / 10) / summary_stats[stn]["count"]     # div by 10 to get from our shorthand int that ignored the decimal back to normal float
-        println("$(String(stn));$min_temp;$max_temp;$avg_temp")
+        #println("$(String(stn));$min_temp;$max_temp;$avg_temp")
     end
 end
 
