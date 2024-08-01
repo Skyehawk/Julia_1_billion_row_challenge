@@ -115,7 +115,7 @@ function print_stats(summary_stats::Dict{String, Dict{String, Int32}})
         min_temp = summary_stats[stn]["min"]
         max_temp = summary_stats[stn]["max"]
         avg_temp = (summary_stats[stn]["sum"] /10) / summary_stats[stn]["count"]     # div by 10 to get from our shorthand int that ignored the decimal back to normal float
-        #println("$stn;$min_temp;$max_temp;$avg_temp")
+        println("$stn;$min_temp;$max_temp;$avg_temp")
     end
 end
 
