@@ -2,7 +2,7 @@ using Mmap, Base.Threads, BenchmarkTools, ThreadsX
 
 # Define the process_chunk function to process each chunk
 function process_chunk(mapped_data::Vector{UInt8}, start_idx::Int, end_idx::Int)
-    data_dict = Dict{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}, Dict{String, Int32}}()
+    data_dict = Dict{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}, Vector{Int32}}()
 
     i = start_idx
     leftover_start = start_idx
@@ -25,13 +25,14 @@ function process_chunk(mapped_data::Vector{UInt8}, start_idx::Int, end_idx::Int)
                         temp_int = extract_temperature(temp_data)
                         # Check if station already exists in dictionary
                         if haskey(data_dict, station_data)
-                            current_values = data_dict[station_data]
-                            current_values["min"] = ifelse(temp_int < current_values["min"], temp_int, current_values["min"])
-                            current_values["max"] = ifelse(temp_int > current_values["max"], temp_int, current_values["max"])
-                            current_values["sum"] += temp_int
-                            current_values["count"] += 1
+                            current_values = data_dict[station_data]   # we use a Vector{Int32} here as updates are faster than dict for a small number of elements
+                            current_values[1] = ifelse(temp_int < current_values[1], temp_int, current_values[1])   # min
+                            current_values[2] = ifelse(temp_int > current_values[2], temp_int, current_values[2])   # max
+                            current_values[3] += temp_int   # sum
+                            current_values[4] += 1    # count
+
                         else
-                            data_dict[station_data] = Dict("min" => temp_int, "max" => temp_int, "sum" => temp_int, "count" => 1)
+                            data_dict[station_data] = [temp_int, temp_int, temp_int, 1]
                         end
                     #catch e
                         # Handle the error if necessary
@@ -60,10 +61,10 @@ function find_semicolon_from_end(line_data::AbstractVector{UInt8})
     return -1
 end
 
+#TODO: See if there is any performance benifit to avoiding the UInt8(<String>) calls. These occur a lot, so small improvments could snowball
 function extract_temperature(temp_data::SubArray{UInt8})
     is_negative = false
     temp_int = 0
-    # The compiler should be smart enough to pre-compute and place these UInt8(str) calls outside the loop
     for byte in temp_data
         if byte == UInt8('-')
             is_negative = true
@@ -91,19 +92,17 @@ function process_file(file_path::String)
     total_length = length(mapped_data)
     chunk_length = div(total_length, Threads.nthreads())
 
-    # Using the `@views` macro to avoid creating unnecessary copies when defining chunks
     @views chunks = [(i, min(i + chunk_length - 1, total_length)) for i in 1:chunk_length:total_length]
 
     results = ThreadsX.map(chunk -> process_chunk(mapped_data, chunk[1], chunk[2]), chunks)
-    combined_result = Dict{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}, Dict{String, Int32}}()
+    combined_result = Dict{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}, Vector{Int32}}()
     incomplete_lines = Vector{Tuple{Int, Int}}()
 
     for result in results
         merge_dicts!(combined_result, result[1])
-        append!(incomplete_lines, result[2])    # Take care of the leftovers (lines that get cut in half on chunk boundries)
+        append!(incomplete_lines, result[2])
     end
 
-    # Process the incomplete lines
     for (start_idx, end_idx) in incomplete_lines
         partial_result, _ = process_chunk(mapped_data, start_idx, end_idx)
         merge_dicts!(combined_result, partial_result)
@@ -112,28 +111,27 @@ function process_file(file_path::String)
     return combined_result
 end
 
-# Function to merge two dictionaries in place
-function merge_dicts!(d1::Dict{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}, Dict{String, Int32}},
-                      d2::Dict{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}, Dict{String, Int32}})
+function merge_dicts!(d1::Dict{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}, Vector{Int32}},
+                      d2::Dict{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}, Vector{Int32}})
     for (key, value) in d2
         if haskey(d1, key)
-            d1[key]["min"] = ifelse(value["min"] < d1[key]["min"], value["min"], d1[key]["min"])
-            d1[key]["max"] = ifelse(value["max"] > d1[key]["max"], value["max"], d1[key]["max"])
-            d1[key]["sum"] += value["sum"]
-            d1[key]["count"] += value["count"]
+            d1[key][1] = ifelse(value[1] < d1[key][1], value[1], d1[key][1])    # Min
+            d1[key][2] = ifelse(value[2] > d1[key][2], value[2], d1[key][2])    # Max
+            d1[key][3] += value[3]                                              # Sum
+            d1[key][4] += value[4]                                              # Count
         else
             d1[key] = value
         end
     end
 end
 
-# Define the print_stats function to print the result
-function print_stats(summary_stats::Dict{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}, Dict{String, Int32}})
+function print_stats(summary_stats::Dict{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}, Vector{Int32}})
     sorted_keys = sort(collect(keys(summary_stats)))
     for stn in sorted_keys
-        min_temp = summary_stats[stn]["min"] / 10
-        max_temp = summary_stats[stn]["max"] / 10 
-        avg_temp = (summary_stats[stn]["sum"] / 10) / summary_stats[stn]["count"]
+        min_temp = summary_stats[stn][1] / 10
+        max_temp = summary_stats[stn][2] / 10 
+        avg_temp = (summary_stats[stn][3] / 10) / summary_stats[stn][4]
+
         println("$(String(stn));$min_temp;$max_temp;$avg_temp")
     end
 end
@@ -145,3 +143,4 @@ if abspath(PROGRAM_FILE) == @__FILE__
     file_path = isempty(ARGS) ? "./measurements_10M.txt" : ARGS[1]
     @time process_file(file_path) |> print_stats
 end
+
