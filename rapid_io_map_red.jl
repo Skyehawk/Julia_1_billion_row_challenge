@@ -1,4 +1,6 @@
 using Mmap, Base.Threads, BenchmarkTools, ThreadsX
+using Base.Iterators: enumerate
+using DataStructures
 
 # Define the process_chunk function to process each chunk
 function process_chunk(mapped_data::Vector{UInt8}, start_idx::Int, end_idx::Int)
@@ -7,41 +9,36 @@ function process_chunk(mapped_data::Vector{UInt8}, start_idx::Int, end_idx::Int)
     i = start_idx
     leftover_start = start_idx
     incomplete_lines = Vector{Tuple{Int, Int}}()
-    # TODO: [Done - needs testing] Gracefully handle leftovers
-    # TODO: Refactor the temperature variables: temp_data, temp_int etc., so as not to be confused with temporary values 
-    while i <= end_idx
-        if mapped_data[i] == UInt8('\n') || i == end_idx
-            line_data = view(mapped_data, leftover_start:i-1) # We want to avoid allocating additional memory for line data, especially since an allocation would require garbage collection
+    
+    # TODO: If we find a new line we can progress our 'i' index along at least 5 bits (e.g. minimum line length would be 'a;0.0', or 5 bits)
+    # 
+    # if we were running a for loop we could use the @simd (single instruction, multiple data) macro, but we need the while in this case
+    @inbounds while  i <= end_idx   
+        if mapped_data[i] == 0x0a || i == end_idx    # 0x0a is the newline char, loop until we find the next newline character 
+            line_data = view(mapped_data, leftover_start:i-1) # Avoid allocating additional memory for line data
             leftover_start = i + 1
 
-            if !isempty(line_data)
+            #if !isempty(line_data)
                 semicolon_index = find_semicolon_from_end(line_data)
-                if semicolon_index > 0
-                    station_data = view(line_data, 1:(semicolon_index-1))
-                    temp_data = view(line_data, (semicolon_index+1):length(line_data))
-
-                    # the try-catch results in a bit of a perfomance hit (153.48 to 134.81 seconds)
-                    #try
-                        temp_int = extract_temperature(temp_data)
-                        # Check if station already exists in dictionary
-                        if haskey(data_dict, station_data)
-                            current_values = data_dict[station_data]   # we use a Vector{Int32} here as updates are faster than dict for a small number of elements
-                            current_values[1] = ifelse(temp_int < current_values[1], temp_int, current_values[1])   # min
-                            current_values[2] = ifelse(temp_int > current_values[2], temp_int, current_values[2])   # max
-                            current_values[3] += temp_int   # sum
-                            current_values[4] += 1    # count
-
-                        else
-                            data_dict[station_data] = [temp_int, temp_int, temp_int, 1]
-                        end
-                    #catch e
-                        # Handle the error if necessary
-                    #    println(e)
-                    #end
+                if semicolon_index > 0    # 4 is the minimum value of the temp data, however, checking if x > 0 is faster than if x >= 4 
+                    station_data = view(line_data, 1:(semicolon_index-1))    # the substring representing the station name
+                    temp_data = view(line_data, (semicolon_index+1):length(line_data))    # substring of temperature data 
+                    temp_int = extract_temperature(temp_data)
+                    #println(temp_int)
+                    if haskey(data_dict, station_data)
+                        current_values = data_dict[station_data]
+                        current_values[1] = ifelse(temp_int < current_values[1], temp_int, current_values[1])   # min
+                        current_values[2] = ifelse(temp_int > current_values[2], temp_int, current_values[2])   # max
+                        current_values[3] += temp_int   # sum
+                        current_values[4] += 1    # count
+                    else
+                        data_dict[station_data] = [temp_int, temp_int, temp_int, 1]
+                    end
                 end
-            end
+            #end
+            #i += 5    # we do this because we know the next newline can't be any less than 5 bytes away (e.g.  a;0.0 )
         end
-        i += 1
+        i += 1 # itterate the loop one more time (independent of our += 6 above)
     end
 
     # Handle incomplete line at the end of the chunk
@@ -52,35 +49,31 @@ function process_chunk(mapped_data::Vector{UInt8}, start_idx::Int, end_idx::Int)
     return data_dict, incomplete_lines
 end
 
-function find_semicolon_from_end(line_data::AbstractVector{UInt8})
-    for i in length(line_data):-1:1
-        if line_data[i] == UInt8(';')
+#WARN: This function is unsafe if the temperature substring is less than 4 bytes
+function find_semicolon_from_end(line_data::SubArray{UInt8})
+    for i in length(line_data)-4:-1:1    # start from the end of the line, as close to the ';' as we can w/o knowing the length of temperature 
+        if line_data[i] == 0x3b  # ASCII ';'
             return i
         end
     end
     return -1
 end
 
-#TODO: See if there is any performance benifit to avoiding the UInt8(<String>) calls. These occur a lot, so small improvments could snowball
+# WARN: This function is unsafe if ANY characters other than '-','.' or [0-9] are passed in the SubArray, we rely on the input data to be correct
 function extract_temperature(temp_data::SubArray{UInt8})
     is_negative = false
     temp_int = 0
+    
     for byte in temp_data
-        if byte == UInt8('-')
+        if byte == 0x2D    # ASCII '-'
             is_negative = true
-        elseif byte == UInt8('.')
-            continue  # Skip the decimal point since we always have exactly 1 decimal place - we divide by 10 when computing final results
-        elseif byte >= UInt8('0') && byte <= UInt8('9')
-            digit = byte - UInt8('0')
-            temp_int = temp_int * 10 + digit # Multiply current value by 10 to free up ones place, then add new digit into the ones place 
+        elseif byte != 0x2E    # ASCII '.' - Skip the decimal point
+            digit = byte - 0x30    # ASCII '0'
+            temp_int = temp_int * 10 + digit
         end
     end
 
-    if is_negative
-        temp_int = -temp_int
-    end
-
-    return temp_int
+    return is_negative ? -temp_int : temp_int
 end
 
 # Define the process_file function to read the file in chunks and process them in parallel
