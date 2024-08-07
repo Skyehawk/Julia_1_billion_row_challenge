@@ -18,15 +18,16 @@ function process_chunk(mapped_data::Vector{UInt8}, start_idx::Int, end_idx::Int)
             line_data = view(mapped_data, leftover_start:i-1) # Avoid allocating additional memory for line data
             leftover_start = i + 1
 
-            #if !isempty(line_data)
+            #if !isempty(line_data)   # we shouldn't need this check, but excluding it makes thing less safe
                 semicolon_index = find_semicolon_from_end(line_data)
                 if semicolon_index > 0    # 4 is the minimum value of the temp data, however, checking if x > 0 is faster than if x >= 4 
                     station_data = view(line_data, 1:(semicolon_index-1))    # the substring representing the station name
                     temp_data = view(line_data, (semicolon_index+1):length(line_data))    # substring of temperature data 
                     temp_int = extract_temperature(temp_data)
-                    #println(temp_int)
+
                     if haskey(data_dict, station_data)
                         current_values = data_dict[station_data]
+                        # ifelse is faster than min/max, a vector is faster struct than a dict for small known indicies
                         current_values[1] = ifelse(temp_int < current_values[1], temp_int, current_values[1])   # min
                         current_values[2] = ifelse(temp_int > current_values[2], temp_int, current_values[2])   # max
                         current_values[3] += temp_int   # sum
@@ -36,9 +37,9 @@ function process_chunk(mapped_data::Vector{UInt8}, start_idx::Int, end_idx::Int)
                     end
                 end
             #end
-            #i += 5    # we do this because we know the next newline can't be any less than 5 bytes away (e.g.  a;0.0 )
+            i += 5    # we do this because we know the next newline can't be any less than 5 bytes away (e.g.  ;0.0 is 5 bytes)
         end
-        i += 1 # itterate the loop one more time (independent of our += 6 above)
+        i += 1 # itterate the counter one more time (independent of our += 5 above)
     end
 
     # Handle incomplete line at the end of the chunk
@@ -120,13 +121,19 @@ end
 
 function print_stats(summary_stats::Dict{SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int64}}, true}, Vector{Int32}})
     sorted_keys = sort(collect(keys(summary_stats)))
+    #min = "oiijoijj"
     for stn in sorted_keys
         min_temp = summary_stats[stn][1] / 10
         max_temp = summary_stats[stn][2] / 10 
         avg_temp = (summary_stats[stn][3] / 10) / summary_stats[stn][4]
 
         println("$(String(stn));$min_temp;$max_temp;$avg_temp")
+        #if length(stn) < length(min)
+        #    min = stn
+        #end
     end
+
+ #println(min, summary_stats[min])
 end
 
 # Main script execution
